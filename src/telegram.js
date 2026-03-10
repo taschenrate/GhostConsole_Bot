@@ -30,6 +30,28 @@ const SUPPORTED_COMMANDS = new Set([
   "execbind"
 ]);
 
+const MAIN_REPLY_KEYBOARD = {
+  reply_markup: {
+    keyboard: [
+      [{ text: "📋 Список" }, { text: "📊 Сводка" }],
+      [{ text: "🔎 Клиент" }, { text: "🎯 Команда" }],
+      [{ text: "👥 Группа" }, { text: "🌐 Всем" }],
+      [{ text: "💬 Чат" }, { text: "❓ Помощь" }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    is_persistent: true,
+    input_field_placeholder: "Выберите действие"
+  }
+};
+
+function withMainKeyboard(extra = {}) {
+  return {
+    ...extra,
+    reply_markup: MAIN_REPLY_KEYBOARD.reply_markup
+  };
+}
+
 function isAdmin(ctx) {
   const id = Number(ctx?.from?.id ?? 0);
   return config.adminIds.includes(id);
@@ -95,6 +117,7 @@ function commandHelpText() {
     "/show <target>, /hide <target>, /status <target>, /optimize <target>",
     "/restore <target>, /stop <target>, /ping <target>, /memory <target>",
     "/chat <target> <text> - отправить текст в чат",
+    "/menu - показать нижние кнопки",
     "",
     "target:",
     "id из /list, nick, client_id, all, group:<name>",
@@ -181,7 +204,7 @@ async function safeEditOrReply(ctx, text, extra) {
       return;
     }
   } catch (_error) {
-    // Fall through to regular reply if edit failed.
+    // Fallback to regular reply.
   }
   await ctx.reply(text, extra);
 }
@@ -189,11 +212,7 @@ async function safeEditOrReply(ctx, text, extra) {
 async function renderList(ctx, page) {
   const paged = await fetchClientsPage(page, 12);
   const rows = paged.rows;
-  const lines = [
-    `Аккаунты: ${paged.total}`,
-    `Страница: ${paged.page}/${paged.pageCount}`,
-    ""
-  ];
+  const lines = [`Аккаунты: ${paged.total}`, `Страница: ${paged.page}/${paged.pageCount}`, ""];
   if (rows.length === 0) {
     lines.push("Список пуст.");
   } else {
@@ -202,6 +221,30 @@ async function renderList(ctx, page) {
     }
   }
   await safeEditOrReply(ctx, lines.join("\n"), buildListKeyboard(rows, paged.page, paged.pageCount));
+}
+
+async function sendSummary(ctx) {
+  const summary = await fetchSummary(config.offlineTimeoutMs);
+  const groups = await fetchGroupsSummary();
+  const lines = [
+    "Сводка:",
+    `Всего: ${summary.total}`,
+    `Online: ${summary.online}`,
+    `Offline: ${summary.offline}`,
+    `ANKA: ${summary.anka}`,
+    `HUB: ${summary.hub}`,
+    `MENU: ${summary.menu}`,
+    `Hidden: ${summary.hidden}`,
+    `Total balance: ${formatMoney(summary.totalBalance)}`
+  ];
+  if (groups.length > 0) {
+    lines.push("");
+    lines.push("Группы:");
+    for (const group of groups.slice(0, 10)) {
+      lines.push(`${group.groupName}: ${group.total} (A:${group.anka} H:${group.hub} M:${group.menu})`);
+    }
+  }
+  await ctx.reply(lines.join("\n"), withMainKeyboard());
 }
 
 function formatResultLine(resultRow) {
@@ -229,6 +272,7 @@ async function renderClientCard(ctx, clientRow, page) {
     `Memory: ${Number.isFinite(clientRow.used_memory_mb) ? `${clientRow.used_memory_mb}MB` : "-"}`,
     `Last seen: ${ageSec == null ? "-" : `${ageSec}s ago`}`
   ];
+
   if (results.length > 0) {
     lines.push("");
     lines.push("Последние результаты:");
@@ -255,7 +299,7 @@ function registerSingleTargetCommands(bot) {
       try {
         const args = extractCommandArgs(ctx.message?.text);
         if (!args) {
-          await ctx.reply(`Usage: /${commandName} <target>`);
+          await ctx.reply(`Usage: /${commandName} <target>`, withMainKeyboard());
           return;
         }
         const result = await enqueueCommandFromSpec({
@@ -264,12 +308,46 @@ function registerSingleTargetCommands(bot) {
           command: commandName,
           restArg: ""
         });
-        await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`);
+        await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`, withMainKeyboard());
       } catch (error) {
-        await ctx.reply(`error: ${error.message}`);
+        await ctx.reply(`error: ${error.message}`, withMainKeyboard());
       }
     });
   }
+}
+
+function registerBottomButtons(bot) {
+  bot.hears("📋 Список", async (ctx) => {
+    await renderList(ctx, 1);
+  });
+
+  bot.hears("📊 Сводка", async (ctx) => {
+    await sendSummary(ctx);
+  });
+
+  bot.hears("🔎 Клиент", async (ctx) => {
+    await ctx.reply("Использование: /client <id|nick|client_id>", withMainKeyboard());
+  });
+
+  bot.hears("🎯 Команда", async (ctx) => {
+    await ctx.reply("Использование: /do <target> <command> [arg]\nПример: /do 12 hide", withMainKeyboard());
+  });
+
+  bot.hears("👥 Группа", async (ctx) => {
+    await ctx.reply("Использование: /group <name> <command> [arg]\nПример: /group farm status", withMainKeyboard());
+  });
+
+  bot.hears("🌐 Всем", async (ctx) => {
+    await ctx.reply("Использование: /all <command> [arg]\nПример: /all status", withMainKeyboard());
+  });
+
+  bot.hears("💬 Чат", async (ctx) => {
+    await ctx.reply("Использование: /chat <target> <text>\nПример: /chat 7 /spawn", withMainKeyboard());
+  });
+
+  bot.hears("❓ Помощь", async (ctx) => {
+    await ctx.reply(commandHelpText(), withMainKeyboard());
+  });
 }
 
 export function createTelegramBot() {
@@ -277,12 +355,16 @@ export function createTelegramBot() {
   bot.use(adminOnly());
 
   bot.start(async (ctx) => {
-    await ctx.reply(commandHelpText());
+    await ctx.reply(commandHelpText(), withMainKeyboard());
     await renderList(ctx, 1);
   });
 
   bot.command("help", async (ctx) => {
-    await ctx.reply(commandHelpText());
+    await ctx.reply(commandHelpText(), withMainKeyboard());
+  });
+
+  bot.command("menu", async (ctx) => {
+    await ctx.reply("Нижние кнопки включены.", withMainKeyboard());
   });
 
   bot.command("list", async (ctx) => {
@@ -292,40 +374,20 @@ export function createTelegramBot() {
   });
 
   bot.command("summary", async (ctx) => {
-    const summary = await fetchSummary(config.offlineTimeoutMs);
-    const groups = await fetchGroupsSummary();
-    const lines = [
-      "Сводка:",
-      `Всего: ${summary.total}`,
-      `Online: ${summary.online}`,
-      `Offline: ${summary.offline}`,
-      `ANKA: ${summary.anka}`,
-      `HUB: ${summary.hub}`,
-      `MENU: ${summary.menu}`,
-      `Hidden: ${summary.hidden}`,
-      `Total balance: ${formatMoney(summary.totalBalance)}`
-    ];
-    if (groups.length > 0) {
-      lines.push("");
-      lines.push("Группы:");
-      for (const group of groups.slice(0, 10)) {
-        lines.push(`${group.groupName}: ${group.total} (A:${group.anka} H:${group.hub} M:${group.menu})`);
-      }
-    }
-    await ctx.reply(lines.join("\n"));
+    await sendSummary(ctx);
   });
 
   bot.command("client", async (ctx) => {
     try {
       const args = extractCommandArgs(ctx.message?.text);
       if (!args) {
-        await ctx.reply("Usage: /client <id|nick|client_id>");
+        await ctx.reply("Usage: /client <id|nick|client_id>", withMainKeyboard());
         return;
       }
       const row = await resolveClientOrThrow(args);
       await renderClientCard(ctx, row, 1);
     } catch (error) {
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -334,7 +396,7 @@ export function createTelegramBot() {
       const args = extractCommandArgs(ctx.message?.text);
       const parts = args.split(/\s+/).filter(Boolean);
       if (parts.length < 2) {
-        await ctx.reply("Usage: /do <target> <command> [arg]");
+        await ctx.reply("Usage: /do <target> <command> [arg]", withMainKeyboard());
         return;
       }
       const targetSpec = parts[0];
@@ -346,9 +408,9 @@ export function createTelegramBot() {
         command,
         restArg
       });
-      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`);
+      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`, withMainKeyboard());
     } catch (error) {
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -357,7 +419,7 @@ export function createTelegramBot() {
       const args = extractCommandArgs(ctx.message?.text);
       const parts = args.split(/\s+/).filter(Boolean);
       if (parts.length < 1) {
-        await ctx.reply("Usage: /all <command> [arg]");
+        await ctx.reply("Usage: /all <command> [arg]", withMainKeyboard());
         return;
       }
       const command = parts[0];
@@ -368,9 +430,9 @@ export function createTelegramBot() {
         command,
         restArg
       });
-      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`);
+      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`, withMainKeyboard());
     } catch (error) {
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -379,7 +441,7 @@ export function createTelegramBot() {
       const args = extractCommandArgs(ctx.message?.text);
       const parts = args.split(/\s+/).filter(Boolean);
       if (parts.length < 2) {
-        await ctx.reply("Usage: /group <name> <command> [arg]");
+        await ctx.reply("Usage: /group <name> <command> [arg]", withMainKeyboard());
         return;
       }
       const groupName = parts[0];
@@ -391,9 +453,9 @@ export function createTelegramBot() {
         command,
         restArg
       });
-      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`);
+      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`, withMainKeyboard());
     } catch (error) {
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -403,7 +465,7 @@ export function createTelegramBot() {
       const [target, ...textParts] = args.split(/\s+/).filter(Boolean);
       const text = textParts.join(" ");
       if (!target || !text) {
-        await ctx.reply("Usage: /chat <target> <text>");
+        await ctx.reply("Usage: /chat <target> <text>", withMainKeyboard());
         return;
       }
       const result = await enqueueCommandFromSpec({
@@ -412,13 +474,14 @@ export function createTelegramBot() {
         command: "chat",
         restArg: text
       });
-      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`);
+      await ctx.reply(`queued command #${result.commandId} -> ${result.recipients.length} client(s)`, withMainKeyboard());
     } catch (error) {
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
   registerSingleTargetCommands(bot);
+  registerBottomButtons(bot);
 
   bot.action(/^pg:(\d+)$/u, async (ctx) => {
     const page = Math.max(1, Math.trunc(Number(ctx.match[1]) || 1));
@@ -439,7 +502,7 @@ export function createTelegramBot() {
       await ctx.answerCbQuery();
     } catch (error) {
       await ctx.answerCbQuery("Error");
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -456,7 +519,7 @@ export function createTelegramBot() {
       await ctx.answerCbQuery("Updated");
     } catch (error) {
       await ctx.answerCbQuery("Error");
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -488,7 +551,7 @@ export function createTelegramBot() {
       await ctx.answerCbQuery(`queued #${queued.commandId}`);
     } catch (error) {
       await ctx.answerCbQuery("Error");
-      await ctx.reply(`error: ${error.message}`);
+      await ctx.reply(`error: ${error.message}`, withMainKeyboard());
     }
   });
 
@@ -504,7 +567,8 @@ export function createTelegramBot() {
       { command: "do", description: "Универсальная команда" },
       { command: "all", description: "Команда всем" },
       { command: "group", description: "Команда группе" },
-      { command: "chat", description: "Сообщение в чат клиента" }
+      { command: "chat", description: "Сообщение в чат клиента" },
+      { command: "menu", description: "Показать нижние кнопки" }
     ])
     .catch((error) => {
       console.error("[telegram] setMyCommands error", error);
