@@ -45,7 +45,9 @@ Copy `.env.example` to `.env` and set values:
 - `CONTROL_API_TOKEN` - shared secret for mod -> API auth.
 - `PORT` - API port (Railway provides automatically).
 - `STATUS_POLL_MS` - notifier poll interval (recommended `5000`).
-- `OFFLINE_TIMEOUT_MS` - account considered offline if no updates (recommended `20000`).
+- `OFFLINE_TIMEOUT_MS` - account considered offline if no updates (recommended `300000`).
+- `STALE_CLIENT_DELETE_MS` - delete client from DB if no updates for this TTL (recommended `300000` = 5 min).
+- `STALE_SWEEP_INTERVAL_MS` - stale cleanup interval (recommended `60000`).
 
 ## 3) Run locally
 

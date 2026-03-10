@@ -14,6 +14,15 @@ function toMs(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function chunkArray(items, size = 200) {
+  const safeSize = Math.max(1, Math.trunc(Number(size) || 200));
+  const chunks = [];
+  for (let i = 0; i < items.length; i += safeSize) {
+    chunks.push(items.slice(i, i + safeSize));
+  }
+  return chunks;
+}
+
 function isMissingBalanceSnapshotsError(error) {
   const code = String(error?.code ?? "");
   const message = String(error?.message ?? "").toLowerCase();
@@ -573,7 +582,43 @@ export async function fetchUnnotifiedEvents(limit = 100) {
     .order("id", { ascending: true })
     .limit(safeLimit);
   if (eventsError) throw eventsError;
-  return events ?? [];
+  const rows = events ?? [];
+  if (rows.length === 0) {
+    return rows;
+  }
+
+  const clientIds = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row?.client_id ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+  if (clientIds.length === 0) {
+    return rows;
+  }
+
+  const { data: clients, error: clientsError } = await supabase
+    .from("clients")
+    .select("client_id, last_seen_at")
+    .in("client_id", clientIds);
+  if (clientsError) throw clientsError;
+
+  const now = Date.now();
+  const timeoutMs = Math.max(60_000, Number(config.staleClientDeleteMs) || 300_000);
+  const activeClientIds = new Set(
+    (clients ?? [])
+      .filter((row) => now - toMs(row.last_seen_at) <= timeoutMs)
+      .map((row) => String(row.client_id))
+  );
+
+  return rows.filter((row) => {
+    const clientId = String(row?.client_id ?? "").trim();
+    if (!clientId) {
+      return true;
+    }
+    return activeClientIds.has(clientId);
+  });
 }
 
 export async function markEventNotified(eventId) {
@@ -601,6 +646,65 @@ export async function pruneOldData(keepDays = 3) {
   // Optional: remove stale clients that were not seen recently.
   const { error: deleteClientsError } = await supabase.from("clients").delete().lt("last_seen_at", cutoff);
   if (deleteClientsError) throw deleteClientsError;
+}
+
+async function deleteRowsByClientIds(table, clientIds) {
+  let deleted = 0;
+  for (const batch of chunkArray(clientIds, 200)) {
+    const { error, count } = await supabase.from(table).delete({ count: "exact" }).in("client_id", batch);
+    if (error) throw error;
+    deleted += Number(count ?? 0);
+  }
+  return deleted;
+}
+
+export async function deleteStaleClients(staleMs = 300_000) {
+  const ttlMs = Math.max(60_000, Math.trunc(Number(staleMs) || 300_000));
+  const cutoff = new Date(Date.now() - ttlMs).toISOString();
+
+  const { data: staleRows, error: staleError } = await supabase
+    .from("clients")
+    .select("client_id")
+    .lt("last_seen_at", cutoff)
+    .limit(5_000);
+  if (staleError) throw staleError;
+
+  const staleClientIds = Array.from(
+    new Set(
+      (staleRows ?? [])
+        .map((row) => String(row?.client_id ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (staleClientIds.length === 0) {
+    return {
+      staleCount: 0,
+      deletedClients: 0,
+      deletedEvents: 0,
+      deletedTargets: 0,
+      deletedResults: 0,
+      deletedSnapshots: 0
+    };
+  }
+
+  const [deletedEvents, deletedTargets, deletedResults, deletedSnapshots] = await Promise.all([
+    deleteRowsByClientIds("events", staleClientIds),
+    deleteRowsByClientIds("command_targets", staleClientIds),
+    deleteRowsByClientIds("command_results", staleClientIds),
+    deleteRowsByClientIds("balance_snapshots", staleClientIds)
+  ]);
+
+  const deletedClients = await deleteRowsByClientIds("clients", staleClientIds);
+
+  return {
+    staleCount: staleClientIds.length,
+    deletedClients,
+    deletedEvents,
+    deletedTargets,
+    deletedResults,
+    deletedSnapshots
+  };
 }
 
 export async function fetchCommandById(commandId) {

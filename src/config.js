@@ -30,7 +30,9 @@ export const config = {
   controlApiToken: required("CONTROL_API_TOKEN"),
   port: readInt("PORT", 8787),
   statusPollMs: readInt("STATUS_POLL_MS", 5000),
-  offlineTimeoutMs: readInt("OFFLINE_TIMEOUT_MS", 20000),
+  offlineTimeoutMs: readInt("OFFLINE_TIMEOUT_MS", 300000),
+  staleClientDeleteMs: readInt("STALE_CLIENT_DELETE_MS", 300000),
+  staleSweepIntervalMs: readInt("STALE_SWEEP_INTERVAL_MS", 60000),
   retentionDays: readInt("RETENTION_DAYS", 3)
 };
 
