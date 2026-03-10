@@ -1,0 +1,20 @@
+{
+  "name": "ghostconsole-control-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram control bot + HTTP hub for GhostConsole clients, backed by Supabase.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.50.0",
+    "express": "^4.21.2",
+    "telegraf": "^4.16.3"
+  }
+}
