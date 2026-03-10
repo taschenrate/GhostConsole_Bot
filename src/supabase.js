@@ -14,6 +14,15 @@ function toMs(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function isMissingBalanceSnapshotsError(error) {
+  const code = String(error?.code ?? "");
+  const message = String(error?.message ?? "").toLowerCase();
+  if (code === "42P01" || code === "PGRST205") {
+    return true;
+  }
+  return message.includes("balance_snapshots") && (message.includes("does not exist") || message.includes("schema cache"));
+}
+
 function normalizeStatus(raw) {
   const value = String(raw ?? "").trim().toUpperCase();
   if (value === "ANKA" || value === "HUB" || value === "MENU") {
@@ -85,7 +94,7 @@ export async function upsertClientState(state) {
     await maybeInsertBalanceSnapshot(previous, current);
   } catch (snapshotError) {
     // Do not block state ingestion if snapshot table is not migrated yet.
-    if (snapshotError?.code !== "42P01") {
+    if (!isMissingBalanceSnapshotsError(snapshotError)) {
       throw snapshotError;
     }
   }
@@ -255,7 +264,7 @@ export async function fetchDashboardStats(offlineTimeoutMs) {
     if (snapshotsError) throw snapshotsError;
     snapshotRows = snapshots24 ?? [];
   } catch (snapshotError) {
-    if (snapshotError?.code !== "42P01") {
+    if (!isMissingBalanceSnapshotsError(snapshotError)) {
       throw snapshotError;
     }
   }

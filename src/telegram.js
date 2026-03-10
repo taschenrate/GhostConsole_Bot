@@ -297,14 +297,24 @@ function buildStatusCard(stats) {
 }
 
 async function sendAvg(ctx) {
-  const stats = await fetchDashboardStats(config.offlineTimeoutMs);
-  await ctx.reply(buildAvgCard(stats), withMainKeyboard());
+  try {
+    const stats = await fetchDashboardStats(config.offlineTimeoutMs);
+    await ctx.reply(buildAvgCard(stats), withMainKeyboard());
+  } catch (error) {
+    console.error("[telegram] avg error", error);
+    await ctx.reply("Ошибка /avg. Проверь SQL миграции и доступ к Supabase.", withMainKeyboard());
+  }
 }
 
 async function sendSummary(ctx) {
-  const stats = await fetchDashboardStats(config.offlineTimeoutMs);
-  await ctx.reply(buildAvgCard(stats), withMainKeyboard());
-  await ctx.reply(buildStatusCard(stats), withMainKeyboard());
+  try {
+    const stats = await fetchDashboardStats(config.offlineTimeoutMs);
+    await ctx.reply(buildAvgCard(stats), withMainKeyboard());
+    await ctx.reply(buildStatusCard(stats), withMainKeyboard());
+  } catch (error) {
+    console.error("[telegram] summary error", error);
+    await ctx.reply("Ошибка /summary. Проверь SQL миграции и доступ к Supabase.", withMainKeyboard());
+  }
 }
 
 function formatResultLine(resultRow) {
