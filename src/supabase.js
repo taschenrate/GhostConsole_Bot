@@ -9,6 +9,11 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function toMs(value) {
+  const ms = new Date(value ?? 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 function normalizeStatus(raw) {
   const value = String(raw ?? "").trim().toUpperCase();
   if (value === "ANKA" || value === "HUB" || value === "MENU") {
@@ -76,7 +81,49 @@ export async function upsertClientState(state) {
   const { error } = await supabase.from("clients").upsert(row, { onConflict: "client_id" });
   if (error) throw error;
   const current = await getClientByClientId(row.client_id);
+  try {
+    await maybeInsertBalanceSnapshot(previous, current);
+  } catch (snapshotError) {
+    // Do not block state ingestion if snapshot table is not migrated yet.
+    if (snapshotError?.code !== "42P01") {
+      throw snapshotError;
+    }
+  }
   return { previous, current };
+}
+
+async function maybeInsertBalanceSnapshot(previous, current) {
+  if (!current || !Number.isFinite(Number(current.balance))) {
+    return;
+  }
+  const clientId = String(current.client_id);
+  const currentBalance = Math.trunc(Number(current.balance));
+  const now = Date.now();
+
+  const { data: latestRows, error: latestError } = await supabase
+    .from("balance_snapshots")
+    .select("balance, created_at")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (latestError) throw latestError;
+  const latest = latestRows?.[0] ?? null;
+
+  const previousBalance = previous && Number.isFinite(Number(previous.balance)) ? Math.trunc(Number(previous.balance)) : null;
+  const balanceChanged = previousBalance == null || previousBalance !== currentBalance;
+  const latestTs = latest ? toMs(latest.created_at) : 0;
+  const latestBalance = latest && Number.isFinite(Number(latest.balance)) ? Math.trunc(Number(latest.balance)) : null;
+  const enoughTimePassed = now - latestTs >= 60_000;
+  const changedSinceLatest = latestBalance == null || latestBalance !== currentBalance;
+
+  if (!latest || (changedSinceLatest && (balanceChanged || enoughTimePassed))) {
+    const { error: insertError } = await supabase.from("balance_snapshots").insert({
+      client_id: clientId,
+      balance: currentBalance,
+      created_at: nowIso()
+    });
+    if (insertError) throw insertError;
+  }
 }
 
 export async function fetchClientsPage(page = 1, pageSize = 15) {
@@ -139,6 +186,129 @@ export async function fetchSummary(offlineTimeoutMs) {
   }
 
   return { total: rows.length, online, offline, anka, hub, menu, hidden, totalBalance };
+}
+
+function pickClientPool(clients, snapshots24, offlineTimeoutMs) {
+  const now = Date.now();
+  const timeout = Math.max(1_000, Number(offlineTimeoutMs) || 20_000);
+  const staleWarningMs = 60 * 60 * 1_000;
+
+  const active = clients.filter((row) => now - toMs(row.last_seen_at) <= timeout);
+  const staleByHour = clients.filter((row) => now - toMs(row.last_seen_at) > staleWarningMs);
+  const snapshotClientIds = new Set(snapshots24.map((item) => String(item.client_id)));
+  const from24h = clients.filter((row) => snapshotClientIds.has(String(row.client_id)));
+
+  const selected = active.length > 0 ? active : from24h;
+  return {
+    selected,
+    fallbackUsed: active.length === 0,
+    staleWarning: staleByHour.length === clients.length && clients.length > 0
+  };
+}
+
+function buildBaselineMaps(snapshots24, cutoff1hMs) {
+  const baseline24 = new Map();
+  const baseline1 = new Map();
+  for (const item of snapshots24) {
+    const clientId = String(item.client_id);
+    const balance = Number(item.balance);
+    if (!Number.isFinite(balance)) {
+      continue;
+    }
+    if (!baseline24.has(clientId)) {
+      baseline24.set(clientId, Math.trunc(balance));
+    }
+    const ts = toMs(item.created_at);
+    if (ts >= cutoff1hMs && !baseline1.has(clientId)) {
+      baseline1.set(clientId, Math.trunc(balance));
+    }
+  }
+  return { baseline24, baseline1 };
+}
+
+function statusText(client) {
+  const status = String(client?.status ?? "MENU");
+  if (status === "ANKA") {
+    return client?.anarchy_id ? `на анке #${client.anarchy_id}` : "на анке";
+  }
+  if (status === "HUB") {
+    return "в хабе";
+  }
+  return "вне сервера";
+}
+
+export async function fetchDashboardStats(offlineTimeoutMs) {
+  const clients = await fetchClients(2_000);
+  const now = Date.now();
+  const cutoff24hMs = now - 24 * 60 * 60 * 1_000;
+  const cutoff1hMs = now - 60 * 60 * 1_000;
+  const cutoff24hIso = new Date(cutoff24hMs).toISOString();
+
+  let snapshotRows = [];
+  try {
+    const { data: snapshots24, error: snapshotsError } = await supabase
+      .from("balance_snapshots")
+      .select("client_id, balance, created_at")
+      .gte("created_at", cutoff24hIso)
+      .order("created_at", { ascending: true })
+      .limit(300_000);
+    if (snapshotsError) throw snapshotsError;
+    snapshotRows = snapshots24 ?? [];
+  } catch (snapshotError) {
+    if (snapshotError?.code !== "42P01") {
+      throw snapshotError;
+    }
+  }
+
+  const pools = pickClientPool(clients, snapshotRows, offlineTimeoutMs);
+  const { baseline24, baseline1 } = buildBaselineMaps(snapshotRows, cutoff1hMs);
+
+  let income1hTotal = 0;
+  let income24hTotal = 0;
+  let calcInstances = 0;
+
+  for (const client of pools.selected) {
+    const current = Number(client.balance);
+    if (!Number.isFinite(current)) {
+      continue;
+    }
+    const clientId = String(client.client_id);
+    const base24 = baseline24.has(clientId) ? Number(baseline24.get(clientId)) : current;
+    const base1 = baseline1.has(clientId) ? Number(baseline1.get(clientId)) : current;
+
+    income24hTotal += Math.trunc(current - base24);
+    income1hTotal += Math.trunc(current - base1);
+    calcInstances += 1;
+  }
+
+  const statusRows = pools.selected
+    .slice()
+    .sort((a, b) => String(a.nick ?? "").localeCompare(String(b.nick ?? ""), "ru"))
+    .slice(0, 25)
+    .map((client) => ({
+      nick: String(client.nick ?? "unknown"),
+      statusText: statusText(client),
+      ageSec: Math.max(0, Math.floor((now - toMs(client.last_seen_at)) / 1000)),
+      balance: Number.isFinite(Number(client.balance)) ? Math.trunc(Number(client.balance)) : null
+    }));
+
+  const totalBalance = pools.selected.reduce((acc, client) => {
+    const value = Number(client.balance);
+    return Number.isFinite(value) ? acc + Math.trunc(value) : acc;
+  }, 0);
+
+  return {
+    generatedAt: new Date(now).toISOString(),
+    calcInstances,
+    income1hTotal,
+    income24hTotal,
+    income1hPerAcc: calcInstances > 0 ? Math.trunc(income1hTotal / calcInstances) : 0,
+    income24hPerAcc: calcInstances > 0 ? Math.trunc(income24hTotal / calcInstances) : 0,
+    totalBalance,
+    staleWarning: pools.staleWarning,
+    fallbackTo24h: pools.fallbackUsed,
+    statusRows
+  };
 }
 
 export async function resolveClientTarget(value) {
@@ -411,6 +581,9 @@ export async function pruneOldData(keepDays = 3) {
 
   const { error: deleteEventsError } = await supabase.from("events").delete().lt("created_at", cutoff);
   if (deleteEventsError) throw deleteEventsError;
+
+  const { error: deleteSnapshotsError } = await supabase.from("balance_snapshots").delete().lt("created_at", cutoff);
+  if (deleteSnapshotsError) throw deleteSnapshotsError;
 
   // Cascades to command_targets and command_results via FK in SQL schema.
   const { error: deleteCommandsError } = await supabase.from("commands").delete().lt("created_at", cutoff);

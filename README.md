@@ -32,6 +32,7 @@ Telegram bot + HTTP API hub for controlling multiple GhostConsole Minecraft clie
 1. Open Supabase SQL editor.
 2. Run `sql/001_schema.sql`.
 3. Optional: run `sql/002_retention.sql`.
+4. If DB was already initialized before this update, run `sql/003_add_balance_snapshots.sql`.
 
 ## 2) Configure env
 
@@ -79,6 +80,7 @@ remoteClientGroup=default
 ## 6) Telegram quick usage
 
 - `/list` - accounts list with buttons.
+- `/avg` - income card (1h/24h).
 - `/client <id>` - account card + action buttons.
 - `/show <id>` / `/hide <id>` / `/status <id>`.
 - `/group <name> show` - send command to group.

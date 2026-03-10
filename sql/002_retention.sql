@@ -25,6 +25,9 @@ begin
   )
   select count(*) into events_count from deleted;
 
+  delete from public.balance_snapshots
+  where created_at < cutoff;
+
   with deleted as (
     delete from public.commands
     where created_at < cutoff

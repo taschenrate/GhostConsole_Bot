@@ -3,9 +3,8 @@ import { config } from "./config.js";
 import {
   createCommandAndTargets,
   fetchClientsPage,
-  fetchGroupsSummary,
+  fetchDashboardStats,
   fetchRecentCommandResults,
-  fetchSummary,
   getClientByDbId,
   resolveClientTarget
 } from "./supabase.js";
@@ -30,25 +29,26 @@ const SUPPORTED_COMMANDS = new Set([
   "execbind"
 ]);
 
-const MAIN_REPLY_KEYBOARD = {
-  reply_markup: {
-    keyboard: [
-      [{ text: "📋 Список" }, { text: "📊 Сводка" }],
-      [{ text: "🔎 Клиент" }, { text: "🎯 Команда" }],
-      [{ text: "👥 Группа" }, { text: "🌐 Всем" }],
-      [{ text: "💬 Чат" }, { text: "❓ Помощь" }]
-    ],
+const MAIN_REPLY_KEYBOARD = Markup.keyboard(
+  [
+    ["📋 Список", "📊 Сводка"],
+    ["📈 Доход", "🧭 Статус"],
+    ["🔎 Клиент", "🎯 Команда"],
+    ["👥 Группа", "🌐 Всем"],
+    ["💬 Чат", "❓ Помощь"]
+  ],
+  {
     resize_keyboard: true,
     one_time_keyboard: false,
     is_persistent: true,
     input_field_placeholder: "Выберите действие"
   }
-};
+);
 
 function withMainKeyboard(extra = {}) {
   return {
     ...extra,
-    reply_markup: MAIN_REPLY_KEYBOARD.reply_markup
+    ...MAIN_REPLY_KEYBOARD
   };
 }
 
@@ -77,8 +77,47 @@ function truncate(value, max) {
 }
 
 function formatMoney(value) {
-  if (!Number.isFinite(Number(value))) return "-";
+  if (!Number.isFinite(Number(value))) return "0";
   return Number(value).toLocaleString("ru-RU");
+}
+
+function formatShort(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}b`;
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${Math.trunc(n)}`;
+}
+
+function formatSignedShort(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  if (n > 0) return `+${formatShort(n)}`;
+  return formatShort(n);
+}
+
+function formatHm(isoValue) {
+  const date = new Date(isoValue ?? 0);
+  if (!Number.isFinite(date.getTime())) return "--:--";
+  return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function formatAge(sec) {
+  const safe = Math.max(0, Math.trunc(Number(sec) || 0));
+  const mm = Math.floor(safe / 60)
+    .toString()
+    .padStart(2, "0");
+  const ss = (safe % 60).toString().padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function statusDot(statusText) {
+  const text = String(statusText ?? "").toLowerCase();
+  if (text.includes("анке")) return "🟢";
+  if (text.includes("хаб")) return "🟡";
+  return "🔴";
 }
 
 function isOffline(row) {
@@ -109,7 +148,8 @@ function commandHelpText() {
   return [
     "Команды бота:",
     "/list [page] - список аккаунтов",
-    "/summary - общая сводка",
+    "/summary - сводка (доход + статус)",
+    "/avg - карточка дохода",
     "/client <id|nick|client_id> - карточка аккаунта",
     "/do <target> <command> [arg] - универсальная команда",
     "/all <command> [arg] - отправить всем",
@@ -119,8 +159,7 @@ function commandHelpText() {
     "/chat <target> <text> - отправить текст в чат",
     "/menu - показать нижние кнопки",
     "",
-    "target:",
-    "id из /list, nick, client_id, all, group:<name>",
+    "target: id из /list, nick, client_id, all, group:<name>",
     "",
     "Примеры:",
     "/show 12",
@@ -223,28 +262,49 @@ async function renderList(ctx, page) {
   await safeEditOrReply(ctx, lines.join("\n"), buildListKeyboard(rows, paged.page, paged.pageCount));
 }
 
-async function sendSummary(ctx) {
-  const summary = await fetchSummary(config.offlineTimeoutMs);
-  const groups = await fetchGroupsSummary();
-  const lines = [
-    "Сводка:",
-    `Всего: ${summary.total}`,
-    `Online: ${summary.online}`,
-    `Offline: ${summary.offline}`,
-    `ANKA: ${summary.anka}`,
-    `HUB: ${summary.hub}`,
-    `MENU: ${summary.menu}`,
-    `Hidden: ${summary.hidden}`,
-    `Total balance: ${formatMoney(summary.totalBalance)}`
-  ];
-  if (groups.length > 0) {
+function buildAvgCard(stats) {
+  return [
+    "📈 Средний доход (все аккаунты)",
+    `Инстансов в расчете: ${stats.calcInstances}`,
+    "",
+    `1ч: ${formatSignedShort(stats.income1hTotal)} (ср/акк ${formatSignedShort(stats.income1hPerAcc)})`,
+    `24ч: ${formatSignedShort(stats.income24hTotal)} (ср/акк ${formatSignedShort(stats.income24hPerAcc)})`,
+    `🕒 На ${formatHm(stats.generatedAt)}`
+  ].join("\n");
+}
+
+function buildStatusCard(stats) {
+  const lines = ["📊 Статус:", ""];
+
+  if (stats.staleWarning || stats.fallbackTo24h) {
+    lines.push("⚠️ Нет апдейтов за 60м, показаны аккаунты за последние 24ч");
     lines.push("");
-    lines.push("Группы:");
-    for (const group of groups.slice(0, 10)) {
-      lines.push(`${group.groupName}: ${group.total} (A:${group.anka} H:${group.hub} M:${group.menu})`);
+  }
+
+  if (stats.statusRows.length === 0) {
+    lines.push("Нет данных по аккаунтам.");
+  } else {
+    for (const row of stats.statusRows) {
+      lines.push(`${statusDot(row.statusText)} ${row.nick} - ${row.statusText} | 🕒 ${formatAge(row.ageSec)}`);
     }
   }
-  await ctx.reply(lines.join("\n"), withMainKeyboard());
+
+  lines.push("");
+  lines.push(`💰 Общий баланс: ${formatMoney(stats.totalBalance)}`);
+  lines.push(`🕒 Обновлено: ${formatHm(stats.generatedAt)}`);
+
+  return lines.join("\n");
+}
+
+async function sendAvg(ctx) {
+  const stats = await fetchDashboardStats(config.offlineTimeoutMs);
+  await ctx.reply(buildAvgCard(stats), withMainKeyboard());
+}
+
+async function sendSummary(ctx) {
+  const stats = await fetchDashboardStats(config.offlineTimeoutMs);
+  await ctx.reply(buildAvgCard(stats), withMainKeyboard());
+  await ctx.reply(buildStatusCard(stats), withMainKeyboard());
 }
 
 function formatResultLine(resultRow) {
@@ -325,6 +385,15 @@ function registerBottomButtons(bot) {
     await sendSummary(ctx);
   });
 
+  bot.hears("📈 Доход", async (ctx) => {
+    await sendAvg(ctx);
+  });
+
+  bot.hears("🧭 Статус", async (ctx) => {
+    const stats = await fetchDashboardStats(config.offlineTimeoutMs);
+    await ctx.reply(buildStatusCard(stats), withMainKeyboard());
+  });
+
   bot.hears("🔎 Клиент", async (ctx) => {
     await ctx.reply("Использование: /client <id|nick|client_id>", withMainKeyboard());
   });
@@ -356,7 +425,7 @@ export function createTelegramBot() {
 
   bot.start(async (ctx) => {
     await ctx.reply(commandHelpText(), withMainKeyboard());
-    await renderList(ctx, 1);
+    await sendSummary(ctx);
   });
 
   bot.command("help", async (ctx) => {
@@ -375,6 +444,14 @@ export function createTelegramBot() {
 
   bot.command("summary", async (ctx) => {
     await sendSummary(ctx);
+  });
+
+  bot.command("s", async (ctx) => {
+    await sendSummary(ctx);
+  });
+
+  bot.command("avg", async (ctx) => {
+    await sendAvg(ctx);
   });
 
   bot.command("client", async (ctx) => {
@@ -562,7 +639,9 @@ export function createTelegramBot() {
   void bot.telegram
     .setMyCommands([
       { command: "list", description: "Список аккаунтов" },
-      { command: "summary", description: "Общая сводка" },
+      { command: "summary", description: "Сводка: доход + статус" },
+      { command: "s", description: "Короткая команда сводки" },
+      { command: "avg", description: "Карточка дохода 1ч/24ч" },
       { command: "client", description: "Карточка аккаунта" },
       { command: "do", description: "Универсальная команда" },
       { command: "all", description: "Команда всем" },

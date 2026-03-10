@@ -64,6 +64,16 @@ create table if not exists public.command_results (
 
 create index if not exists idx_command_results_client on public.command_results (client_id, id desc);
 
+create table if not exists public.balance_snapshots (
+  id bigserial primary key,
+  client_id text not null,
+  balance bigint not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_balance_snapshots_client_time on public.balance_snapshots (client_id, created_at);
+create index if not exists idx_balance_snapshots_time on public.balance_snapshots (created_at desc);
+
 create table if not exists public.events (
   id bigserial primary key,
   client_id text null,
